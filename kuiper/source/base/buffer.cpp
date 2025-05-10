@@ -16,8 +16,11 @@ Buffer::Buffer(size_t byte_size, std::shared_ptr<DeviceAllocator> allocator, voi
 }
 
 Buffer::~Buffer() {
+  // 如果我们这里将use_external置为false，
+  // 表示当前Buffer拥有该内存，表示这块资源需要Buffer进行管理，
   if (!use_external_) {
     if (ptr_ && allocator_) {
+      // 那么在Buffer对象释放的时候会调用对应allocator的释放方法，自动释放这块内存。
       allocator_->release(ptr_);
       ptr_ = nullptr;
     }
@@ -36,6 +39,10 @@ size_t Buffer::byte_size() const {
   return byte_size_;
 }
 
+/*
+  情况1，为Buffer分配一块所属的内存，使用内存分配器分配得到的内存指针是ptr_，
+  并且将use_external置为false，表示在Buffer对象析构的时候也要将相关联的资源指针进行释放。
+*/
 bool Buffer::allocate() {
   if (allocator_ && byte_size_ != 0) {
     use_external_ = false;
