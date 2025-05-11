@@ -58,6 +58,9 @@ base::Status Layer::check_tensor_with_dim(const tensor::Tensor& tensor,
                                           base::DeviceType device_type, base::DataType data_type,
                                           ...) const {
   std::va_list args;
+  // 这个函数允许灵活地验证张量维度
+  // 这种设计在机器学习框架中特别有用，
+  // 能够简洁地验证输入张量是否符合模型期望的形状，避免后续计算出现错误。
   if (tensor.is_empty()) {
     return base::error::InvalidArgument("The tensor parameter is empty.");
   }
@@ -70,12 +73,15 @@ base::Status Layer::check_tensor_with_dim(const tensor::Tensor& tensor,
 
   va_start(args, data_type);
   int32_t dims = tensor.dims_size();
+  // 循环遍历张量的每个维度
   for (int32_t i = 0; i < dims; ++i) {
+    // 提取下一个参数值（预期为int32_t类型）
     int32_t dim = va_arg(args, int32_t);
     if (dim != tensor.get_dim(i)) {
       return base::error::InvalidArgument("The tensor has a wrong dim in dim" + std::to_string(i));
     }
   }
+  // 完成可变参数处理，释放资源
   va_end(args);
   return base::error::Success();
 }

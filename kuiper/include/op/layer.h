@@ -30,7 +30,8 @@ class BaseLayer {
   base::DataType data_type() const;
 
   LayerType layer_type() const;
-
+  
+  // = 0 后缀：将函数声明为纯虚函数
   virtual base::Status init() = 0;
 
   virtual base::Status forward() = 0;
@@ -184,6 +185,7 @@ class LayerParam : public Layer {
   int32_t group_size_ = 0;
   bool is_quant_layer_ = false;
   tensor::Tensor scales_;
+  // 用于额外存放权重数据
   std::vector<tensor::Tensor> weights_;
 };
 }  // namespace op

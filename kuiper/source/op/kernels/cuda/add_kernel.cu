@@ -26,8 +26,8 @@ void add_kernel_cu(const tensor::Tensor& input1, const tensor::Tensor& input2,
     add_kernel_cu_fp32<<<block_num, thread_num, 0, stream_>>>(
         size, input1.ptr<float>(), input2.ptr<float>(), const_cast<float*>(output.ptr<float>()));
   } else {
-    add_kernel_cu_fp32<<<block_num, thread_num>>>(size, input1.ptr<float>(), input2.ptr<float>(),
-                                                  const_cast<float*>(output.ptr<float>()));
+    add_kernel_cu_fp32<<<block_num, thread_num>>>(
+        size, input1.ptr<float>(), input2.ptr<float>(), const_cast<float*>(output.ptr<float>()));
   }
 }
 }  // namespace kernel
