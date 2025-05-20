@@ -189,11 +189,23 @@ void LayerParam::to_cuda() {
 
 base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dims,
                                     const void* weight_ptr, base::DeviceType device_type) {
+  
+  /*
+    idx：权重索引，指定要设置的是哪个权重（一个层可能有多个权重）
+    dims：权重的维度信息，如[词汇表大小, 嵌入维度]
+    weight_ptr：指向权重数据的原始指针
+    device_type：指定设备类型（CPU/GPU等）
+  */
+  // 检查：索引非负，索引在有效范围内，权重指针不为空
   CHECK_GE(idx, 0);
   CHECK_LT(idx, weights_.size());
   CHECK_NE(weight_ptr, nullptr);
 
+  // 2. 计算内存大小并创建Buffer
+  // 计算内存大小：使用std::accumulate和std::multiplies计算所有维度的乘积，再乘以sizeof(float)得到总字节数
   size_t size = std::accumulate(dims.begin(), dims.end(), sizeof(float), std::multiplies<>());
+  // 创建零拷贝Buffer：注意最后一个参数true，这表明创建的是一个"零拷贝"Buffer，
+  // 它不会复制weight_ptr指向的数据，而是直接引用它.
   std::shared_ptr<base::Buffer> buffer =
       std::make_shared<base::Buffer>(size, nullptr, const_cast<void*>(weight_ptr), true);
   if (device_type != base::DeviceType::kDeviceUnknown) {
@@ -201,10 +213,26 @@ base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dim
   }
 
   if (!is_quant_layer_) {
+    // 非量化层处理（浮点权重）
+    // 创建一个32位浮点类型的张量，形状为指定的dims
     tensor::Tensor weight(base::DataType::kDataTypeFp32, dims);
     weight.set_device_type(device_type);
+    // 将刚才创建的buffer关联到张量
     CHECK(weight.assign(buffer));
+    // 将张量存储到weights_容器的指定位置
     weights_.at(idx) = weight;
+    /*
+      在CPU场景下，整个链路从mmap到最终的Tensor是完全零拷贝的，
+      所有对象都直接或间接地引用最初映射的内存，形成了这样的引用链：
+          映射内存空间 <- weight_ptr <- Buffer <- Tensor <- weights_容器中的元素
+
+      当设备类型为GPU时，情况就会有所不同：
+        这时候会发生什么呢？由于权重数据需要在GPU上使用，
+        但原始数据位于CPU内存（通过mmap映射的内存空间），所以必然需要进行一次CPU到GPU的数据传输。
+        这个传输通常在weight.assign(buffer)中实现
+        此时的引用链变成了：
+          映射内存空间 -> 复制 -> GPU内存 <- Tensor <- weights_容器中的元素
+    */
   } else {
     // is quant layer
     tensor::Tensor weight(base::DataType::kDataTypeInt8, dims);

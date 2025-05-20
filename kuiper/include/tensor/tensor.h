@@ -11,22 +11,23 @@ namespace tensor {
 
 class Tensor {
  public:
+  // 创建一个空张量，所有成员使用默认值，适用于需要后续再设置属性的情况（延迟初始化）
   explicit Tensor() = default;
-
+  // 固定维度构造函数（1D到4D）
   explicit Tensor(base::DataType data_type, int32_t dim0, bool need_alloc = false,
                   std::shared_ptr<base::DeviceAllocator> alloc = nullptr, void* ptr = nullptr);
-
+  // 固定维度构造函数（1D到4D）
   explicit Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, bool need_alloc = false,
                   std::shared_ptr<base::DeviceAllocator> alloc = nullptr, void* ptr = nullptr);
-
+  // 固定维度构造函数（1D到4D）
   explicit Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2,
                   bool need_alloc = false, std::shared_ptr<base::DeviceAllocator> alloc = nullptr,
                   void* ptr = nullptr);
-
+  // 固定维度构造函数（1D到4D）
   explicit Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2, int32_t dim3,
                   bool need_alloc = false, std::shared_ptr<base::DeviceAllocator> alloc = nullptr,
                   void* ptr = nullptr);
-
+  // 支持任意维度的张量创建，适用于运行时确定维度或高维张量，更灵活，但少了编译时的维度检查。
   explicit Tensor(base::DataType data_type, std::vector<int32_t> dims, bool need_alloc = false,
                   std::shared_ptr<base::DeviceAllocator> alloc = nullptr, void* ptr = nullptr);
 
@@ -88,8 +89,11 @@ class Tensor {
   tensor::Tensor clone() const;
 
  private:
+  // 张量中数据的个数，比如张量后期要存储3个数据，分别为{1，2，3}，那么size的大小就等于3。
   size_t size_ = 0;
+  // 张量的维度，比如有一个二维张量，且维度分别是{2, 3}，那么dim_记录的值就是{2,3}
   std::vector<int32_t> dims_;
+  // 用来管理用分配器申请到的内存资源，在Buffer中我们用到RAII和智能指针技术。
   std::shared_ptr<base::Buffer> buffer_;
   base::DataType data_type_ = base::DataType::kDataTypeUnknown;
 };

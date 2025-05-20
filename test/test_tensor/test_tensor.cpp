@@ -142,3 +142,19 @@ TEST(test_tensor, assign1) {
   ASSERT_NE(t1_cpu.ptr<float>(), nullptr);
   delete[] ptr;
 }
+
+// 对张量数据的访问的测试
+TEST(test_tensor, index) {
+  using namespace base;
+  float* ptr = new float[32];
+  auto alloc_cu = base::CPUDeviceAllocatorFactory::get_instance();
+  ptr[0] = 31;
+  tensor::Tensor t1(base::DataType::kDataTypeFp32, 32, false, nullptr, ptr);
+  void* p1 = t1.ptr<void>();
+  p1 += 1;
+
+  float* f1 = t1.ptr<float>();
+  f1 += 1;
+  ASSERT_NE(f1, p1);
+  delete[] ptr;
+}

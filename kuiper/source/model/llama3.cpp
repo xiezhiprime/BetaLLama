@@ -287,22 +287,47 @@ void LLama2Model::create_param_quant_layers() {
   }
 }
 
+// 这个函数实现了Llama2模型参数层的创建过程，负责从预加载的权重数据中构建完整的神经网络架构。
 void LLama2Model::create_param_layers() {
+  /*
+    内存布局:
+        [嵌入层权重] -> pos从这里开始
+        [所有层的第一组RMSNorm权重] -> rmsnorm_pos从这里开始
+        [所有层的WQ权重] -> pos访问这些
+        [所有层的WK权重] -> pos访问这些
+        [所有层的WV权重] -> pos访问这些
+        [所有层的WO权重] -> pos访问这些
+        [所有层的第二组RMSNorm权重] -> rmsnorm_pos跳到这里
+        [所有层的W1权重] -> pos访问这些
+        [所有层的W2权重] -> pos访问这些
+        [所有层的W3权重] -> pos访问这些
+        [最终RMSNorm权重] -> rmsnorm_pos最终到达这里
+        [分类器权重(如果不共享)] -> pos最终到达这里
+  */
+  // 函数首先进行两项检查：确保当前不是量化模型, 确保llama_layers_指针已经被初始化
   CHECK(!is_quant_model_);
   CHECK(llama_layers_ != nullptr);
   // The embedding layer
   auto cpu_device_type = base::DeviceType::kDeviceCPU;
   llama_layers_->embedding_layer_ = std::make_shared<op::EmbeddingLayer>(
       device_type_, config_->dim_, config_->seq_len_, std::abs(config_->vocab_size_));
-
+  /*
+    从原始模型数据的起始位置(索引0)获取嵌入层权重
+    raw_model_data_ 是一个指向预加载模型数据的对象，包含了整个LLaMA2模型的所有权重。
+    .weight(0) 方法通过索引0访问存储在模型数据最前面的权重块。
+    在LLaMA2的权重布局中，嵌入层(embedding layer)的权重总是位于最前面。
+  */
   const void* weight_embedding = raw_model_data_->weight(0);
+  // 设置嵌入层的权重，形状为[vocab_size, dim]
   llama_layers_->embedding_layer_->set_weight(0, {std::abs(config_->vocab_size_), config_->dim_},
                                               weight_embedding, cpu_device_type);
 
   // create all matmul layer
   int32_t dim = config_->dim_;
+  // 这里初始化了权重位置追踪器pos，它指向嵌入层权重之后的位置，用于后续加载各层权重。
   size_t pos = dim * std::abs(config_->vocab_size_) + dim * config_->layer_num_;
-  // create weight matrix for query
+
+  // create weight matrix for query 为每一层Transformer创建查询矩阵，维度为[dim, dim]。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto wq = std::make_shared<op::MatmulLayer>(device_type_, dim, dim);
     wq->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -311,6 +336,8 @@ void LLama2Model::create_param_layers() {
   }
 
   // create weight matrix for key
+  // 创建键矩阵，注意其维度为[kv_dim_, dim]，这里的kv_dim_可能与主维度dim不同，
+  // 这是LLaMA模型的特点之一，用于实现分组查询注意力(GQA)。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto wk = std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim);
     wk->set_weight(0, {config_->kv_dim_, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -319,6 +346,7 @@ void LLama2Model::create_param_layers() {
   }
 
   // create weight matrix for value
+  // 创建值矩阵，维度同样为[kv_dim_, dim]。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto wv = std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim);
     wv->set_weight(0, {config_->kv_dim_, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -327,6 +355,7 @@ void LLama2Model::create_param_layers() {
   }
 
   // create weight matrix for output
+  // 创建输出矩阵，维度为[dim, dim]，用于将多头注意力的输出投影回原始维度空间。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto wo = std::make_shared<op::MatmulLayer>(device_type_, dim, dim);
     wo->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -334,10 +363,10 @@ void LLama2Model::create_param_layers() {
     pos += dim * dim;
   }
 
-  // skip ffn rmsnorm
+  // skip ffn rmsnorm 跳过FFN的RMSNorm权重：
   pos += config_->layer_num_ * dim;
 
-  // w1 layers
+  // w1 layers 创建W1层，维度为[hidden_dim, dim]，用于第一次线性变换。
   int32_t hidden_dim = config_->hidden_dim_;
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto w1 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim);
@@ -346,7 +375,7 @@ void LLama2Model::create_param_layers() {
     pos += dim * hidden_dim;
   }
 
-  // w2 layers
+  // w2 layers  创建W2层，维度为[dim, hidden_dim]，用于第二次线性变换。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto w2 = std::make_shared<op::MatmulLayer>(device_type_, dim, hidden_dim);
     w2->set_weight(0, {dim, hidden_dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -354,7 +383,7 @@ void LLama2Model::create_param_layers() {
     pos += dim * hidden_dim;
   }
 
-  // w3 layers
+  // w3 layers 创建W3层，维度为[hidden_dim, dim]，这是LLaMA架构特有的第三个线性变换层，用于实现SwiGLU激活函数。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     auto w3 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim);
     w3->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
@@ -362,25 +391,34 @@ void LLama2Model::create_param_layers() {
     pos += dim * hidden_dim;
   }
 
+  // 跳过其他权重
   // skip final rms weight
   pos += dim;
   // skip freqs_cos and freqs_sin weight
   pos += config_->seq_len_ * config_->head_size_;
 
+  // 创建分类层，维度为[vocab_size, dim]，用于最终的token预测。
   llama_layers_->cls_layer_ =
       std::make_shared<op::MatmulLayer>(device_type_, config_->vocab_size_, dim);
+  // 这里有一个重要的选择： 如果is_shared_weight_为真，则重用嵌入层的权重(权重共享)
   if (config_->is_shared_weight_) {
     // using token embedding weight
     llama_layers_->cls_layer_->set_weight(0, {config_->vocab_size_, dim},
                                           this->raw_model_data_->weight(0), cpu_device_type);
-  } else {
+  } else { // 否则，使用新的独立权重
     llama_layers_->cls_layer_->set_weight(0, {config_->vocab_size_, dim},
                                           this->raw_model_data_->weight(pos), cpu_device_type);
   }
 
-  // create rmsnorm layer
+  // create rmsnorm layer 重新初始化权重位置指针rmsnorm_pos来加载RMSNorm层权重。
+  /* 这一行设置了rmsnorm_pos的初始值，它指向嵌入层权重之后的位置：
+    为什么从这里开始？ 因为在LLaMA2模型中，权重数据的布局是有规律的：
+    首先是嵌入层的权重，然后是各种层的归一化权重，
+    之后是各层的注意力权重和前馈网络权重。
+    这个初始位置指向了第一个RMSNorm层权重的开始位置。
+  */
   size_t rmsnorm_pos = config_->dim_ * std::abs(config_->vocab_size_);
-
+  // 创建每个Transformer层中的第一个RMSNorm层，维度为[dim]。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     std::shared_ptr<op::RmsNormLayer> rms_norm_layer =
         std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
@@ -390,15 +428,18 @@ void LLama2Model::create_param_layers() {
     llama_layers_->rmsnorm_layers_.push_back(rms_norm_layer);
     rmsnorm_pos += config_->dim_;
   }
-
-  // skip attention.wq attention.wk attention.wv attention.wo
+  // 这几行代码跳过了所有层的注意力权重矩阵。 为什么要跳过这些？ 
+  // 因为函数已经在前面的部分（通过pos变量）加载了这些权重，这里只是需要跳过它们，以便rmsnorm_pos能指向下一组RMSNorm层的权重。
+  // skip attention.wq attention.wk attention.wv attention.wo 跳过注意力相关权重
   rmsnorm_pos += config_->layer_num_ * config_->dim_ * config_->dim_;
   rmsnorm_pos +=
       config_->layer_num_ * config_->dim_ * (config_->kv_head_num_ * config_->head_size_);
   rmsnorm_pos +=
       config_->layer_num_ * config_->dim_ * (config_->kv_head_num_ * config_->head_size_);
   rmsnorm_pos += config_->layer_num_ * config_->dim_ * config_->dim_;
-
+  // 创建每个Transformer层中的第二个RMSNorm层，用于注意力机制之后的归一化。
+  // 这个循环为每个Transformer层的第二个RMSNorm层加载权重。
+  // 这些RMSNorm层位于注意力机制之后，前馈网络之前，用于再次归一化数据。
   for (int32_t i = 0; i < config_->layer_num_; ++i) {
     std::shared_ptr<op::RmsNormLayer> rms_norm_layer =
         std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
@@ -408,12 +449,15 @@ void LLama2Model::create_param_layers() {
 
     rmsnorm_pos += config_->dim_;
   }
-
-  // skip ffn.w1 ffn.w2 ffn.w3
+  // 这三行跳过了所有层的前馈网络权重矩阵：
+  // skip ffn.w1 ffn.w2 ffn.w3 跳过FFN权重
   rmsnorm_pos += config_->layer_num_ * config_->hidden_dim_ * config_->dim_;
   rmsnorm_pos += config_->layer_num_ * config_->hidden_dim_ * config_->dim_;
   rmsnorm_pos += config_->layer_num_ * config_->hidden_dim_ * config_->dim_;
 
+  // 创建网络最后的RMSNorm层，用于最终输出之前的归一化。
+  // 经过所有这些调整后，rmsnorm_pos最终指向了整个模型最后的RMSNorm层权重的位置。
+  // 这个最终的RMSNorm层应用于整个Transformer堆栈的输出，在进行最终的token预测之前归一化表示。
   std::shared_ptr<op::RmsNormLayer> rms_final_layer =
       std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
 

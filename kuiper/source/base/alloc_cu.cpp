@@ -19,6 +19,7 @@ void* CUDADeviceAllocator::allocate(size_t byte_size) const {
     for (int i = 0; i < big_buffers.size(); i++) {
       if (big_buffers[i].byte_size >= byte_size && !big_buffers[i].busy &&
           big_buffers[i].byte_size - byte_size < 1 * 1024 * 1024) {
+            // 第三个条件限制了可复用内存块与请求大小之间的"浪费空间"不能超过1MB。
         if (sel_id == -1 || big_buffers[sel_id].byte_size > big_buffers[i].byte_size) {
           sel_id = i;
         }

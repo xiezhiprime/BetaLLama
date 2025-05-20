@@ -3,6 +3,8 @@
 #include <glog/logging.h>
 #include <cstdint>
 #include <string>
+// 这段代码定义了一个名为 UNUSED 的宏，
+// 用于标记函数参数或变量"故意不使用"，防止编译器产生"未使用变量"的警告。
 #define UNUSED(expr) \
   do {               \
     (void)(expr);    \

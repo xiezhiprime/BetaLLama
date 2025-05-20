@@ -51,6 +51,7 @@ def quantize_q80(w, group_size):
     takes a tensor and returns the Q8_0 quantized version
     i.e. symmetric quantization into int8, range [-127,127]
     """
+    # group_size : 一个分组的大小
     assert w.numel() % group_size == 0
     ori_shape = w.shape
     w = w.float()  # convert to float32
@@ -58,11 +59,11 @@ def quantize_q80(w, group_size):
     # find the max in each group
     wmax = torch.abs(w).max(dim=1).values
     # calculate the scaling factor such that float = quant * scale
-    scale = wmax / 127.0
+    scale = wmax / 127.0 # 得到每一组的scale
     # scale into range [-127, 127]
-    quant = w / scale[:, None]
+    quant = w / scale[:, None] # 得到量化值
     # round to nearest integer
-    int8val = torch.round(quant).to(torch.int8)
+    int8val = torch.round(quant).to(torch.int8) # 四舍五入
     # dequantize by rescaling
     fp32val = (int8val.float() * scale[:, None]).view(-1)
     fp32valr = fp32val.reshape(-1, group_size)
