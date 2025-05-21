@@ -111,9 +111,29 @@ void mha_kernel_cu(int32_t pos, int32_t head_num, int32_t layer_index, int32_t s
                    const tensor::Tensor& query_tensor, const tensor::Tensor& score_tensor,
                    const tensor::Tensor& key_cache_tensor, const tensor::Tensor& value_cache_tensor,
                    base::DeviceType device_type, CudaConfig* config) {
+  /*
+      pos：当前处理的序列位置
+      head_num：注意力头的数量
+      layer_index：当前Transformer层的索引
+      seq_len：序列长度
+      kv_dim：键（key）和值（value）向量的维度
+      kv_mul：键值操作的某种乘数因子
+      head_size：每个注意力头的大小
+      多个张量参数：mha_out（输出）、query_tensor（查询）、score_tensor（注意力分数）、key_cache_tensor（键缓存）和value_cache_tensor（值缓存）
+      device_type：设备类型（代码中标记为未使用）
+      config：CUDA配置指针
+  */
   UNUSED(device_type);
+  // 计算了当前层在缓存中的偏移量，用于定位该层对应的键值缓存。
   int32_t layer_offset = layer_index * seq_len * kv_dim;
+  // 使用const_cast将常量指针转换为可修改指针，以便后续计算。
+  // 函数接口中的定义，告诉调用者："我保证不会修改你传入的张量数据结构本身"。
+  // 这里的const_cast只是在告诉编译器："我知道我在做什么，让我访问这些数据"，而不是在修改张量的结构。
   float* query = const_cast<float*>(query_tensor.ptr<float>());
+  /*
+      这种"先定义为常量，后转为非常量"的模式是C++中平衡安全性与灵活性的常见做法。
+      它在高性能计算和CUDA编程中尤为普遍，因为这些领域既需要严格的接口契约，又需要底层实现的灵活性。
+  */
   float* score = const_cast<float*>(score_tensor.ptr<float>());
   float* output = const_cast<float*>(mha_out.ptr<float>());
 

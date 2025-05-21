@@ -165,7 +165,7 @@ base::Status LLama2Model::forward(const tensor::Tensor& input, const tensor::Ten
   cls_logits(input);
   return base::error::Success();
 }
-
+// 创建非参数层，需要读一下
 void LLama2Model::create_nonparam_layers() {
   CHECK(llama_layers_ != nullptr);
   llama_layers_->rope_layer_ = std::make_shared<op::RoPELayer>(
@@ -724,16 +724,23 @@ void LLama2Model::feed_forward(int32_t layer_idx, const tensor::Tensor& input) c
   // residual add
   CHECK_NE(llama_layers_->add_layer_, nullptr)
       << "The add layer in the feedforward block is null pointer";
+  // 首先执行的是残差连接，将输入与注意力输出(kAttnOutput)相加。
+  // 这是transformer架构的标准做法，帮助解决深层网络中的梯度消失问题。结果存储回input。
+  // 这里最终直接调用add kernel
   STATUS_CHECK(
       llama_layers_->add_layer_->forward(input, get_buffer(ModelBufferType::kAttnOutput), input));
 
-  // ffn rmsnorm
+  // 这里使用RMSNorm（均方根归一化）处理前一步的输出。
+  // Llama2不使用传统的LayerNorm，而是采用RMSNorm，这是该模型架构的特点之一。
+  // 归一化结果存入ffn_norm_output。
   tensor::Tensor ffn_norm_output = get_buffer(ModelBufferType::kFFNRMSNorm);
   const auto& ffn_rmsnorm = llama_layers_->rmsnorm_layers_.at(layer_idx + config_->layer_num_);
   CHECK_NE(ffn_rmsnorm, nullptr)
       << "The final rmsnorm layer in the feedforward block is null pointer";
   STATUS_CHECK(ffn_rmsnorm->forward(input, ffn_norm_output));
 
+  // 这里执行两个并行的线性变换，将归一化后的输入分别通过W1和W3两个权重矩阵。
+  // 这是SwiGLU激活函数所需的双路径设计。
   // w1
   tensor::Tensor w1_output = get_buffer(ModelBufferType::kW1Output);
   const auto& w1_layer = llama_layers_->w1_layers_.at(layer_idx);
@@ -745,18 +752,21 @@ void LLama2Model::feed_forward(int32_t layer_idx, const tensor::Tensor& input) c
   const auto& w3_layer = llama_layers_->w3_layers_.at(layer_idx);
   CHECK_NE(w3_layer, nullptr) << "The w3 layer in the feedforward block is null pointer";
   STATUS_CHECK(w3_layer->forward(ffn_norm_output, w3_ouput));
-
+  
+  // SwiGLU是Llama2使用的门控激活函数，它结合了Swish激活和门控机制, 这一步将W1和W3的输出组合，结果存回w1_output。
   // SwiGLU
   CHECK_NE(llama_layers_->swiglu_layer_, nullptr)
       << "The swiglu layer in the feedforward block is null pointer";
   STATUS_CHECK(llama_layers_->swiglu_layer_->forward(w1_output, w3_ouput, w1_output));
-
+  
+  // 将SwiGLU的输出通过最后一个线性层W2进行变换，得到最终的FFN输出。
   // w2
   tensor::Tensor w2_output = get_buffer(ModelBufferType::kW2Output);
   const auto& w2_layer = llama_layers_->w2_layers_.at(layer_idx);
   CHECK_NE(w2_layer, nullptr) << "The w2 layer in the feedforward block is null pointer";
   STATUS_CHECK(w2_layer->forward(w1_output, w2_output));
-
+  
+  // 执行最后的残差连接，将原始输入与FFN的输出相加，结果再次存回input，完成整个前馈网络的计算。
   // residual add
   CHECK_NE(llama_layers_->add_layer_, nullptr)
       << "The add layer in the feedforward block is null pointer";
