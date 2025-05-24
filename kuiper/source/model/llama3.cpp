@@ -104,31 +104,44 @@ LLama2Model::LLama2Model(base::TokenizerType tokenizer_type, std::string token_p
     : Model(tokenizer_type, base::ModelType::kModelTypeLLama2, std::move(token_path),
             std::move(model_path), is_quant_model) {}
 
+/*
+  一个完整的模型初始化流程，涵盖了从设备选择、资源分配到模型参数加载的所有环节。
+  特别值得注意的是，代码对CPU和GPU两种运行环境提供了不同的实现路径，并进行了必要的错误检查，确保模型能够在正确的环境中启动。
+*/
 base::Status LLama2Model::init(base::DeviceType device_type) {
   using namespace base;
+  // 确保分词器路径不为空，这是模型处理文本的必要组件
   if (token_path_.empty()) {
     return error::PathNotValid(token_path_);
   }
+  // 验证如果使用CPU时不能运行量化（int8）模型，这是一个硬件兼容性限制
   if (device_type == base::DeviceType::kDeviceCPU && is_quant_model_) {
     return error::InternalError("The cpu device do not support int8 quant model.");
   }
 
   device_type_ = device_type;
   if (device_type == DeviceType::kDeviceCUDA) {
+    // 选择系统中的第一个CUDA设备（GPU 0）
     cudaSetDevice(0);
+    // 创建CUDA配置对象
     cuda_config_ = std::make_shared<kernel::CudaConfig>();
+    // 创建CUDA流以支持异步操作，这对于高效处理大型矩阵计算非常重要
     cudaStreamCreate(&cuda_config_->stream);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
       return error::InternalError("The cuda hanle create failed.");
     }
   }
-
+  
+  // 从checkpoint文件加载预训练模型参数， 这个函数中创建了网络的各个层，以及使用mmap将参数从文件中映射到程序中。
   Status read_status = gen_model_from_file();
   if (!read_status) {
     return read_status;
   }
+
+  // 负责为模型分配和初始化必要的内存缓冲区，为后续的模型计算做准备。
   init_mem();
+  // 这段代码计算正弦和余弦缓存，用于transformer模型的位置编码 : 位置编码允许模型理解序列中token的相对位置，这对于语言理解至关重要
   if (device_type_ == base::DeviceType::kDeviceCPU) {
     kernel::sin_cos_cache_calc_cpu(config_->head_size_, config_->seq_len_,
                                    get_buffer(ModelBufferType::kSinCache).ptr<float>(),
@@ -139,7 +152,7 @@ base::Status LLama2Model::init(base::DeviceType device_type) {
                                   get_buffer(ModelBufferType::kSinCache),
                                   get_buffer(ModelBufferType::kCosCache), cuda_config_->stream);
   }
-
+  // 创建一个ArgmaxSampler（最大值采样器）实例，用于文本生成时选择最可能的下一个词元
   sampler_ = std::make_unique<sampler::ArgmaxSampler>(device_type_);
   return error::Success();
 }
@@ -165,7 +178,7 @@ base::Status LLama2Model::forward(const tensor::Tensor& input, const tensor::Ten
   cls_logits(input);
   return base::error::Success();
 }
-// 创建非参数层，需要读一下
+
 void LLama2Model::create_nonparam_layers() {
   CHECK(llama_layers_ != nullptr);
   llama_layers_->rope_layer_ = std::make_shared<op::RoPELayer>(
@@ -466,75 +479,98 @@ void LLama2Model::create_param_layers() {
   llama_layers_->rmsnorm_layers_.push_back(rms_final_layer);
 }
 
+// 激活值缓冲区：这才是我们在init_mem()中看到的内存部分，用于存储计算过程中的中间结果和最终输出。
 void LLama2Model::init_mem() {
+  // 首先根据之前设置的设备类型选择合适的内存分配器
   std::shared_ptr<base::DeviceAllocator> alloc;
   if (device_type_ == base::DeviceType::kDeviceCPU) {
+    // 这是一个工厂模式的应用，使得代码能够在不同的硬件环境下透明地工作。
+    // 单例模式（get_instance()）确保整个应用程序中只有一个分配器实例，有助于集中管理内存资源。
     alloc = base::CPUDeviceAllocatorFactory::get_instance();
   } else {
     alloc = base::CUDADeviceAllocatorFactory::get_instance();
   }
 
+  // 这是为了确保模型参数在GPU上可用，这对于加速计算至关重要。
   if (device_type_ == base::DeviceType::kDeviceCUDA) {
     CHECK_NE(cuda_config_, nullptr);
     llama_layers_->to_cuda(cuda_config_);
   }
-
+  // 这里同时获取了CPU和CUDA分配器的实例，
+  // 这是因为即使在GPU模式下，某些张量（比如输入tokens）仍然需要存储在CPU内存中，而其他张量则需要存储在GPU上以加速计算。
   std::shared_ptr<base::DeviceAllocator> alloc_cpu =
       base::CPUDeviceAllocatorFactory::get_instance();
   std::shared_ptr<base::DeviceAllocator> alloc_cu =
       base::CUDADeviceAllocatorFactory::get_instance();
 
+  // 这些是模型的输入端，input_tokens存储原始的token索引，而input_embeddings则存储这些tokens转换成的向量表示。
+  // 存储整数类型的输入token ID，总是分配在CPU上
   tensor::Tensor input_tokens(base::DataType::kDataTypeInt32, 1, true, alloc_cpu);
+  // 存储浮点类型的词嵌入向量，维度为模型的嵌入维度（config_->dim_）
   tensor::Tensor input_embeddings(base::DataType::kDataTypeFp32, 1, config_->dim_, true, alloc);
+
+  // 这实现了Transformer模型中的旋转位置编码（RoPE），它帮助模型理解tokens的相对位置
+  // 这两个张量用于存储预计算的位置编码值, 大小是注意力头大小乘以序列长度
   tensor::Tensor sin_cache(base::DataType::kDataTypeFp32, config_->head_size_ * config_->seq_len_,
                            true, alloc);
   tensor::Tensor cos_cache(base::DataType::kDataTypeFp32, config_->head_size_ * config_->seq_len_,
                            true, alloc);
 
+  // 这段代码将创建的张量注册到模型的内部缓冲区管理系统中，
+  // 每个缓冲区都有一个枚举类型标识符（如kSinCache），使得后续代码可以通过这些标识符检索特定张量。
+  // CHECK宏确保每次插入操作都成功。
   CHECK(insert_buffer(ModelBufferType::kSinCache, sin_cache));
   CHECK(insert_buffer(ModelBufferType::kCosCache, cos_cache));
-
   CHECK(insert_buffer(ModelBufferType::kInputTokens, input_tokens));
   CHECK(insert_buffer(ModelBufferType::kInputEmbeddings, input_embeddings));
 
+  // 这段代码创建并注册了用于存储不同处理阶段中间结果的张量：
+  // rms_output：维度为模型的嵌入维度，用于存储RMSNorm（Root Mean Square Normalization）层的输出
+  // FIXME:  highlight: 有趣的是，同一个张量被用于多个不同的缓冲区位置，这是一种内存优化技术，因为这些操作是按顺序执行的，可以重用同一块内存。
   tensor::Tensor rms_output(base::DataType::kDataTypeFp32, config_->dim_, true, alloc);
   CHECK(insert_buffer(ModelBufferType::kOutputRMSNorm, rms_output));
   CHECK(insert_buffer(ModelBufferType::kOutputMHA, rms_output));
   CHECK(insert_buffer(ModelBufferType::kW2Output, rms_output));
   CHECK(insert_buffer(ModelBufferType::kFFNRMSNorm, rms_output));
 
+  // 这些张量用于存储前馈神经网络（FFN）层的中间输出
+  // 维度为config_->hidden_dim_，通常比模型的主要维度dim_大4倍
+  // 在Llama架构中，FFN包含了SwiGLU激活函数，需要W1和W3两个分支的计算结果
   tensor::Tensor w1_output(base::DataType::kDataTypeFp32, config_->hidden_dim_, true, alloc);
   tensor::Tensor w3_output(base::DataType::kDataTypeFp32, config_->hidden_dim_, true, alloc);
-
   CHECK(insert_buffer(ModelBufferType::kW1Output, w1_output));
   CHECK(insert_buffer(ModelBufferType::kW3Output, w3_output));
 
-  // kv cache
+  // kv cache 这是自回归生成过程的关键优化部分
+  // key_cache和value_cache存储之前生成的每个token的键和值向量
+  // 三维张量，维度为[层数, 序列长度, KV维度]
+  // 缓存这些值可以避免在生成新token时重复计算之前的键和值，大大提高推理效率
   tensor::Tensor key_cache(base::DataType::kDataTypeFp32, config_->layer_num_, config_->seq_len_,
                            config_->kv_dim_, true, alloc);
   tensor::Tensor value_cache(base::DataType::kDataTypeFp32, config_->layer_num_, config_->seq_len_,
                              config_->kv_dim_, true, alloc);
-
   CHECK(insert_buffer(ModelBufferType::kKeyCache, key_cache));
   CHECK(insert_buffer(ModelBufferType::kValueCache, value_cache));
 
-  // Wq query output
+  // Wq query output  query：存储注意力机制中的查询向量
   tensor::Tensor query(base::DataType::kDataTypeFp32, config_->dim_, true, alloc);
   CHECK(insert_buffer(ModelBufferType::kQuery, query));
 
-  // Pos tensor
+  // Pos tensor  pos_tensor：存储位置索引，用于位置编码
   tensor::Tensor pos_tensor(base::DataType::kDataTypeInt32, 1, true, alloc_cpu);
   CHECK(insert_buffer(ModelBufferType::kInputPos, pos_tensor));
 
-  // Attention output
+  // Attention output  attn：存储注意力分数，维度为[头数, 序列长度]
   tensor::Tensor attn(base::DataType::kDataTypeFp32, config_->head_num_, config_->seq_len_, true,
                       alloc);
   CHECK(insert_buffer(ModelBufferType::kScoreStorage, attn));
+  // FIXME: 注意到kAttnOutput重用了query张量，又一个内存优化实例
   CHECK(insert_buffer(ModelBufferType::kAttnOutput, query));
 
-  // final forward output
+  // final forward output forward_output：维度为词汇表大小，存储每个可能词元的概率分布
   tensor::Tensor forward_output(base::DataType::kDataTypeFp32, config_->vocab_size_, true, alloc);
   if (device_type_ == base::DeviceType::kDeviceCUDA) {
+    // 如果在GPU模式下，还额外创建CPU版本的输出张量，这可能是为了将结果复制回CPU以便进一步处理或采样
     tensor::Tensor forward_output_cpu(base::DataType::kDataTypeFp32, config_->vocab_size_, true,
                                       alloc_cpu);
     CHECK(insert_buffer(ModelBufferType::kForwardOutputCPU, forward_output_cpu));
@@ -620,23 +656,31 @@ base::Status LLama2Model::create_layers() {
 }
 
 op::EmbeddingOutput LLama2Model::embedding(const std::vector<int>& tokens) const {
+  // 将token ID序列转换为对应的嵌入向量表示。这是模型推理的第一步，将离散的token转换为连续的向量空间表示。
+
+  // 模型使用预分配的缓冲区而不是每次都创建新内存。这些缓冲区在模型初始化时就已分配好，被反复重用以提高效率。
   auto input_tokens = get_buffer(ModelBufferType::kInputTokens);
   auto input_embeddings = get_buffer(ModelBufferType::kInputEmbeddings);
+  // 只有在输入大小变化时才重新调整缓冲区形状，这是一个优化措施。
+  // 在生成阶段，输入大小通常是固定的（一个token），所以这部分代码可能很少执行。
   if (input_tokens.size() != tokens.size()) {
     input_tokens.reshape({static_cast<int32_t>(tokens.size())});
     input_embeddings.reshape({static_cast<int32_t>(tokens.size()), config_->dim_});
   }
+  // 将输入token ID复制到准备好的缓冲区中。
   for (int32_t i = 0; i < tokens.size(); ++i) {
     input_tokens.index<int32_t>(i) = tokens.at(i);
   }
 
+  //  这里创建了一个新张量来记录token数量。注意这是唯一一个在函数内创建的新张量。
   auto input_token_num =
       tensor::Tensor(base::DataType::kDataTypeInt32, static_cast<int32_t>(tokens.size()));
   LOG_IF(FATAL, !llama_layers_->embedding_layer_)
       << "The embedding layer in the llama2 model is null pointer.";
+  // 调用嵌入层的前向传播函数，直接在input_embeddings缓冲区内计算结果，不产生额外副本。
   STATUS_CHECK(
       llama_layers_->embedding_layer_->forward(input_tokens, input_token_num, input_embeddings));
-
+  // 将三个组件打包成一个EmbeddingOutput结构并返回。(构造函数中使用了移动语义，所以并没有复制)
   op::EmbeddingOutput output(input_tokens, input_embeddings, input_token_num);
   return output;
 }
